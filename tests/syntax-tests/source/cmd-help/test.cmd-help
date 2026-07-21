@@ -7,6 +7,13 @@ USAGE:
     bat [OPTIONS] [FILE]...
     bat <SUBCOMMAND>
 
+Clap-style inline usage:
+Usage: fd [OPTIONS] [pattern] [path]...
+Usage: demo --config <FILE> [-- <ARGS>...] <MODE>...
+Usage: parent [OPTIONS]
+       parent test --child <child>
+       parent help [COMMAND]...
+
 ARGS:
     <FILE>...    File(s) to print / concatenate. Use '-' for standard input.
 

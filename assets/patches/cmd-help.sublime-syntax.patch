@@ -1,0 +1,99 @@
+diff --git syntaxes/02_Extra/cmd-help/syntaxes/cmd-help.sublime-syntax syntaxes/02_Extra/cmd-help/syntaxes/cmd-help.sublime-syntax
+--- syntaxes/02_Extra/cmd-help/syntaxes/cmd-help.sublime-syntax
++++ syntaxes/02_Extra/cmd-help/syntaxes/cmd-help.sublime-syntax
+@@ -30,6 +30,10 @@ variables:
+   allcaps_argument_name: '[A-Z][0-9A-Z_-]*\b'
+   relaxed_argument_name: '[A-Za-z][0-9A-Za-z_-]*\b'
+ 
++### inline usage variables:
++  usage_option_name: '[^ \t\n,=\[</:|\]>{}]+'
++  usage_word: '[^ \t\n\[\]{}<>|]+'
++
+ ### other-def variables:
+   other_lowercase_name: '[a-z][0-9a-z_-]*\b'
+   long_space: '   |\t|\n'
+@@ -146,6 +150,9 @@ contexts:
+       set: indent-0
+     - match: ^ {1,2}(?=\S)
+       set: indent-1-2
++    # clap_builder/src/output/usage.rs: USAGE_SEP prefixes alternatives with 7 spaces.
++    - match: '^ {7}(?=(?!-){{usage_word}}(?: +(?!-){{usage_word}})* +(?:\[|<|-))'
++      set: clap-usage-expression
+     - match: ^ {3,8}(?=\S)
+       set: indent-3-8
+     - match: ^\t{1,2}(?=\S)
+@@ -186,18 +193,66 @@ contexts:
+   heading-specials:
+     - match: (?i:usage):(?=.+\n)
+       scope: *INLINE_USAGE_SCOPES
+-      set: maybe-bat
++      set: clap-usage-expression
+     - include: python-argparse-headings
+ 
++  # clap_builder/src/output/usage.rs: write_arg_usage writes command, options, then arguments.
++  # clap_builder/src/builder/arg.rs: Arg::stylized and render_arg_val define token forms.
++  clap-usage-expression:
++    - include: clap-usage-structural-token
++    - match: '{{usage_word}}'
++      scope: *KEYWORD_SCOPES
++    - include: eol-pop
+ 
+-  # hack to harmonize usage lines in bat's help message
+-  #nice: generalize this pattern and remove this hardcoded case
+-  maybe-bat:
+-    - match: " (bat)"
++  clap-usage-structural-token:
++    - match: --(?=\s|[\]}>|])
++      scope: *END_OF_OPTIONS_SCOPE
++    - match: (-[^ \t\n,=\[</:|\]>{}\.]+)(?={{ellipsis}}(?:\s|[\]}>|]))
+       captures:
+-        1: *KEYWORD_SCOPES
+-      set: then-pop
+-    - include: else-pop
++        1: *OPTION_SCOPES
++    - match: -{{usage_option_name}}
++      scope: *OPTION_SCOPES
++    - match: '\['
++      scope: *ARGUMENT_SCOPES
++      push: clap-usage-square-group
++    - match: '<'
++      scope: *ARGUMENT_SCOPES
++      push: clap-usage-angle-group
++    - match: '{'
++      scope: *ARGUMENT_SCOPES
++      push: clap-usage-curly-group
++    - match: '{{ellipsis}}'
++      scope: *ARGUMENT_SCOPES
++
++  clap-usage-square-group:
++    - match: '\]'
++      scope: *ARGUMENT_SCOPES
++      pop: true
++    - include: clap-usage-structural-token
++    - match: '\|'
++      scope: *ARGUMENT_SCOPES
++    - match: '[^ \t\n\[\]{}<>|]+'
++      scope: *ARGUMENT_SCOPES
++
++  clap-usage-angle-group:
++    - match: '>'
++      scope: *ARGUMENT_SCOPES
++      pop: true
++    - include: clap-usage-structural-token
++    - match: '\|'
++      scope: *ARGUMENT_SCOPES
++    - match: '[^ \t\n\[\]{}<>|]+'
++      scope: *ARGUMENT_SCOPES
++
++  clap-usage-curly-group:
++    - match: '}'
++      scope: *ARGUMENT_SCOPES
++      pop: true
++    - include: clap-usage-structural-token
++    - match: '\|'
++      scope: *ARGUMENT_SCOPES
++    - match: '[^ \t\n\[\]{}<>|]+'
++      scope: *KEYWORD_SCOPES
+ 
+   ### option definitions #######################################################
+ 
