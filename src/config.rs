@@ -6,6 +6,7 @@ use crate::style::StyleComponents;
 use crate::syntax_mapping::SyntaxMapping;
 use crate::wrapping::WrappingMode;
 use crate::StripAnsiMode;
+use syntect::parsing::Regex;
 
 #[derive(Debug, Clone)]
 pub enum VisibleLines {
@@ -93,6 +94,9 @@ pub struct Config<'a> {
 
     /// Ranges of lines which should be highlighted with a special background color
     pub highlighted_lines: HighlightedLineRanges,
+
+    /// Patterns whose matches should be highlighted with a special background color
+    pub highlighted_search_patterns: Vec<Regex>,
 
     /// Whether or not to allow custom assets. If this is false or if custom assets (a.k.a.
     /// cached assets) are not available, assets from the binary will be used instead.

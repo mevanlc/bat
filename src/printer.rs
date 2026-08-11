@@ -1,3 +1,4 @@
+use std::ops::Range;
 use std::vec::Vec;
 
 use nu_ansi_term::Color::{Fixed, Green, Red, Yellow};
@@ -10,6 +11,7 @@ use syntect::highlighting::Color;
 use syntect::highlighting::FontStyle;
 use syntect::highlighting::Theme;
 use syntect::parsing::SyntaxSet;
+use syntect::parsing::{Regex, Region};
 
 use content_inspector::ContentType;
 
@@ -48,6 +50,123 @@ use crate::StripAnsiMode;
 // here instead of the previous default of 0.
 fn char_width(c: char) -> usize {
     c.width().unwrap_or(if c.is_control() { 2 } else { 0 })
+}
+
+fn search_highlight_ranges(
+    patterns: &[Regex],
+    regions: &mut [Region],
+    line: &str,
+) -> Vec<Range<usize>> {
+    let line = line.trim_end_matches(['\r', '\n']);
+    let mut ranges = Vec::new();
+    for (pattern, region) in patterns.iter().zip(regions) {
+        let mut search_start = 0;
+        while pattern.search(line, search_start, line.len(), Some(region)) {
+            let Some((start, end)) = region.pos(0) else {
+                break;
+            };
+            if start < end {
+                ranges.push(start..end);
+            }
+
+            if end > search_start {
+                search_start = end;
+            } else if let Some(next) = line[end..].chars().next() {
+                search_start = end + next.len_utf8();
+            } else {
+                break;
+            }
+        }
+    }
+    ranges.sort_unstable_by_key(|range| (range.start, range.end));
+
+    let mut merged: Vec<Range<usize>> = Vec::with_capacity(ranges.len());
+    for range in ranges {
+        if let Some(previous) = merged.last_mut() {
+            if range.start <= previous.end {
+                previous.end = previous.end.max(range.end);
+                continue;
+            }
+        }
+        merged.push(range);
+    }
+    merged
+}
+
+#[derive(Debug, Eq, PartialEq)]
+struct SearchHighlightSegment<'a> {
+    text: &'a str,
+    highlighted: bool,
+}
+
+struct SearchHighlightSegments<'a> {
+    text: &'a str,
+    text_offset: usize,
+    cursor: usize,
+    ranges: &'a [Range<usize>],
+    range_index: usize,
+}
+
+fn split_search_highlights<'a>(
+    text: &'a str,
+    text_offset: usize,
+    ranges: &'a [Range<usize>],
+) -> SearchHighlightSegments<'a> {
+    SearchHighlightSegments {
+        text,
+        text_offset,
+        cursor: text_offset,
+        ranges,
+        range_index: 0,
+    }
+}
+
+impl<'a> Iterator for SearchHighlightSegments<'a> {
+    type Item = SearchHighlightSegment<'a>;
+
+    fn next(&mut self) -> Option<Self::Item> {
+        let text_end = self.text_offset + self.text.len();
+        while self
+            .ranges
+            .get(self.range_index)
+            .is_some_and(|range| range.end <= self.cursor)
+        {
+            self.range_index += 1;
+        }
+        if self.cursor >= text_end {
+            return None;
+        }
+
+        let Some(range) = self.ranges.get(self.range_index) else {
+            let segment = SearchHighlightSegment {
+                text: &self.text[self.cursor - self.text_offset..],
+                highlighted: false,
+            };
+            self.cursor = text_end;
+            return Some(segment);
+        };
+
+        if self.cursor < range.start {
+            let segment_end = range.start.min(text_end);
+            let segment = SearchHighlightSegment {
+                text: &self.text[self.cursor - self.text_offset..segment_end - self.text_offset],
+                highlighted: false,
+            };
+            self.cursor = segment_end;
+            return Some(segment);
+        }
+
+        let segment_end = range.end.min(text_end);
+        let segment = SearchHighlightSegment {
+            text: &self.text[self.cursor - self.text_offset..segment_end - self.text_offset],
+            highlighted: true,
+        };
+        self.cursor = segment_end;
+        if self.cursor >= range.end {
+            self.range_index += 1;
+        }
+        Some(segment)
+    }
 }
 
 const ANSI_UNDERLINE_ENABLE: EscapeSequence = EscapeSequence::CSI {
@@ -209,6 +328,7 @@ pub(crate) struct InteractivePrinter<'a> {
     pub line_changes: &'a Option<LineChanges>,
     highlighter_from_set: Option<HighlighterFromSet<'a>>,
     background_color_highlight: Option<Color>,
+    search_regions: Vec<Region>,
     consecutive_empty_lines: usize,
     strip_ansi: bool,
     sanitize: bool,
@@ -342,6 +462,9 @@ impl<'a> InteractivePrinter<'a> {
             line_changes,
             highlighter_from_set,
             background_color_highlight,
+            search_regions: (0..config.highlighted_search_patterns.len())
+                .map(|_| Region::new())
+                .collect(),
             consecutive_empty_lines: 0,
             strip_ansi,
             sanitize,
@@ -474,6 +597,61 @@ impl<'a> InteractivePrinter<'a> {
 
         *cursor += text.len();
         text.to_string()
+    }
+
+    fn write_styled_text(
+        &self,
+        handle: &mut OutputHandle,
+        style: syntect::highlighting::Style,
+        text: &str,
+        background_color: Option<Color>,
+        underline: bool,
+    ) -> Result<()> {
+        if underline {
+            write!(handle, "{}", ANSI_UNDERLINE_ENABLE.raw())?;
+        }
+        write!(
+            handle,
+            "{}",
+            as_terminal_escaped(
+                style,
+                text,
+                self.config.true_color,
+                self.config.colored_output,
+                self.config.use_italic_text,
+                background_color,
+            )
+        )?;
+        if underline {
+            write!(handle, "{}", ANSI_UNDERLINE_DISABLE.raw())?;
+        }
+        Ok(())
+    }
+
+    fn write_wrapped_text(
+        &self,
+        handle: &mut OutputHandle,
+        style: syntect::highlighting::Style,
+        text: &str,
+        search_highlights: &[Range<usize>],
+        highlight_line: bool,
+        underline_search_matches: bool,
+    ) -> Result<()> {
+        for segment in split_search_highlights(text, 0, search_highlights) {
+            let styled_text = format!("{}{}", self.ansi_style, segment.text);
+            let background_color = self
+                .background_color_highlight
+                .filter(|_| highlight_line || segment.highlighted);
+
+            self.write_styled_text(
+                handle,
+                style,
+                &styled_text,
+                background_color,
+                segment.highlighted && underline_search_matches,
+            )?;
+        }
+        Ok(())
     }
 }
 
@@ -732,9 +910,19 @@ impl Printer for InteractivePrinter<'_> {
             self.ansi_style.update(ANSI_UNDERLINE_ENABLE);
         }
 
-        let background_color = self
+        let line_background_color = self
             .background_color_highlight
             .filter(|_| highlight_this_line);
+        let search_highlight_ranges = if highlight_this_line {
+            Vec::new()
+        } else {
+            search_highlight_ranges(
+                &self.config.highlighted_search_patterns,
+                &mut self.search_regions,
+                &line,
+            )
+        };
+        let underline_search_matches = self.config.theme == "ansi";
 
         // Line decorations.
         if self.panel_width > 0 {
@@ -752,48 +940,54 @@ impl Printer for InteractivePrinter<'_> {
         // Line contents.
         if matches!(self.config.wrapping_mode, WrappingMode::NoWrapping(_)) {
             let true_color = self.config.true_color;
-            let colored_output = self.config.colored_output;
-            let italics = self.config.use_italic_text;
+            let mut source_offset = 0;
 
             for &(style, region) in &regions {
                 let ansi_iterator = EscapeSequenceIterator::new(region);
                 for chunk in ansi_iterator {
+                    let chunk_len = chunk.raw().len();
                     match chunk {
                         // Regular text.
                         EscapeSequence::Text(text) => {
-                            let text = self.preprocess(text, &mut cursor_total);
-                            let text_trimmed = text.trim_end_matches(['\r', '\n']);
+                            for segment in split_search_highlights(
+                                text,
+                                source_offset,
+                                &search_highlight_ranges,
+                            ) {
+                                let text = self.preprocess(segment.text, &mut cursor_total);
+                                let text_trimmed = text.trim_end_matches(['\r', '\n']);
+                                let background_color = self
+                                    .background_color_highlight
+                                    .filter(|_| highlight_this_line || segment.highlighted);
+                                let underline = segment.highlighted && underline_search_matches;
+                                let styled_text = format!("{}{text_trimmed}", self.ansi_style);
 
-                            write!(
-                                handle,
-                                "{}{}",
-                                as_terminal_escaped(
+                                self.write_styled_text(
+                                    handle,
                                     style,
-                                    &format!("{}{text_trimmed}", self.ansi_style),
-                                    true_color,
-                                    colored_output,
-                                    italics,
-                                    background_color
-                                ),
-                                self.ansi_style.to_reset_sequence(),
-                            )?;
+                                    &styled_text,
+                                    background_color,
+                                    underline,
+                                )?;
+                                write!(handle, "{}", self.ansi_style.to_reset_sequence())?;
 
-                            // Pad the rest of the line.
-                            if text.len() != text_trimmed.len() {
-                                if let Some(background_color) = background_color {
-                                    let ansi_style = Style {
-                                        background: to_ansi_color(background_color, true_color),
-                                        ..Default::default()
-                                    };
+                                // Pad the rest of a fully highlighted line.
+                                if text.len() != text_trimmed.len() {
+                                    if let Some(background_color) = line_background_color {
+                                        let ansi_style = Style {
+                                            background: to_ansi_color(background_color, true_color),
+                                            ..Default::default()
+                                        };
 
-                                    let width = if cursor_total <= cursor_max {
-                                        cursor_max - cursor_total + 1
-                                    } else {
-                                        0
-                                    };
-                                    write!(handle, "{}", ansi_style.paint(" ".repeat(width)))?;
+                                        let width = if cursor_total <= cursor_max {
+                                            cursor_max - cursor_total + 1
+                                        } else {
+                                            0
+                                        };
+                                        write!(handle, "{}", ansi_style.paint(" ".repeat(width)))?;
+                                    }
+                                    write!(handle, "{}", &text[text_trimmed.len()..])?;
                                 }
-                                write!(handle, "{}", &text[text_trimmed.len()..])?;
                             }
                         }
 
@@ -803,6 +997,7 @@ impl Printer for InteractivePrinter<'_> {
                             self.ansi_style.update(chunk);
                         }
                     }
+                    source_offset += chunk_len;
                 }
             }
 
@@ -810,19 +1005,19 @@ impl Printer for InteractivePrinter<'_> {
                 writeln!(handle)?;
             }
         } else {
+            let mut source_offset = 0;
             for &(style, region) in &regions {
                 let ansi_iterator = EscapeSequenceIterator::new(region);
                 for chunk in ansi_iterator {
+                    let chunk_len = chunk.raw().len();
                     match chunk {
                         // Regular text.
                         EscapeSequence::Text(text) => {
-                            let text = self
-                                .preprocess(text.trim_end_matches(['\r', '\n']), &mut cursor_total);
-
                             let mut max_width = cursor_max - cursor;
 
-                            // line buffer (avoid calling write! for every character)
+                            // Line buffer (avoid calling write! for every character).
                             let mut line_buf = String::with_capacity(max_width * 4);
+                            let mut line_buf_search_highlights: Vec<Range<usize>> = Vec::new();
 
                             // Displayed width of line_buf
                             let mut current_width = 0;
@@ -832,111 +1027,130 @@ impl Printer for InteractivePrinter<'_> {
                             // For word wrapping, track last whitespace position.
                             let mut last_ws_idx: Option<usize> = None;
 
-                            for c in text.chars() {
-                                // calculate the displayed width for next character
-                                let cw = char_width(c);
-                                current_width += cw;
+                            for segment in split_search_highlights(
+                                text,
+                                source_offset,
+                                &search_highlight_ranges,
+                            ) {
+                                let text = self.preprocess(
+                                    segment.text.trim_end_matches(['\r', '\n']),
+                                    &mut cursor_total,
+                                );
 
-                                // Track whitespace positions for word wrapping.
-                                if word_wrap && c.is_whitespace() {
-                                    last_ws_idx = Some(line_buf.len());
-                                }
+                                for c in text.chars() {
+                                    // calculate the displayed width for next character
+                                    let cw = char_width(c);
+                                    current_width += cw;
 
-                                // if next character cannot be printed on this line,
-                                // flush the buffer.
-                                if current_width > max_width {
-                                    // Generate wrap padding if not already generated.
-                                    if panel_wrap.is_none() {
-                                        panel_wrap = if self.panel_width > 0 {
-                                            Some(format!(
-                                                "{} ",
-                                                self.decorations
-                                                    .iter()
-                                                    .map(|d| d
-                                                        .generate(line_number, true, self)
-                                                        .text)
-                                                    .collect::<Vec<String>>()
-                                                    .join(" ")
-                                            ))
-                                        } else {
-                                            Some("".to_string())
-                                        }
+                                    // Track whitespace positions for word wrapping.
+                                    if word_wrap && c.is_whitespace() {
+                                        last_ws_idx = Some(line_buf.len());
                                     }
 
-                                    // Determine the break point and remainder
-                                    // for word wrapping.
-                                    let (emit_end, rest_start) = if word_wrap {
-                                        if let Some(ws_idx) = last_ws_idx {
-                                            // Skip the whitespace character itself
-                                            // and carry the rest to the next line.
-                                            let rs = ws_idx
-                                                + line_buf[ws_idx..]
-                                                    .chars()
-                                                    .next()
-                                                    .map(|ch| ch.len_utf8())
-                                                    .unwrap_or(0);
-                                            (ws_idx, Some(rs))
+                                    // if next character cannot be printed on this line,
+                                    // flush the buffer.
+                                    if current_width > max_width {
+                                        // Generate wrap padding if not already generated.
+                                        if panel_wrap.is_none() {
+                                            panel_wrap = if self.panel_width > 0 {
+                                                Some(format!(
+                                                    "{} ",
+                                                    self.decorations
+                                                        .iter()
+                                                        .map(|d| d
+                                                            .generate(line_number, true, self)
+                                                            .text)
+                                                        .collect::<Vec<String>>()
+                                                        .join(" ")
+                                                ))
+                                            } else {
+                                                Some("".to_string())
+                                            }
+                                        }
+
+                                        // Determine the break point and remainder
+                                        // for word wrapping.
+                                        let (emit_end, rest_start) = if word_wrap {
+                                            if let Some(ws_idx) = last_ws_idx {
+                                                // Skip the whitespace character itself
+                                                // and carry the rest to the next line.
+                                                (ws_idx, Some(ws_idx + 1))
+                                            } else {
+                                                (line_buf.len(), None)
+                                            }
                                         } else {
                                             (line_buf.len(), None)
-                                        }
-                                    } else {
-                                        (line_buf.len(), None)
-                                    };
+                                        };
 
-                                    // It wraps.
-                                    write!(
-                                        handle,
-                                        "{}{}\n{}",
-                                        as_terminal_escaped(
+                                        // It wraps.
+                                        self.write_wrapped_text(
+                                            handle,
                                             style,
-                                            &format!(
-                                                "{}{}",
-                                                self.ansi_style,
-                                                &line_buf[..emit_end]
-                                            ),
-                                            self.config.true_color,
-                                            self.config.colored_output,
-                                            self.config.use_italic_text,
-                                            background_color
-                                        ),
-                                        self.ansi_style.to_reset_sequence(),
-                                        panel_wrap.clone().unwrap()
-                                    )?;
+                                            &line_buf[..emit_end],
+                                            &line_buf_search_highlights,
+                                            highlight_this_line,
+                                            underline_search_matches,
+                                        )?;
+                                        write!(
+                                            handle,
+                                            "{}\n{}",
+                                            self.ansi_style.to_reset_sequence(),
+                                            panel_wrap.clone().unwrap()
+                                        )?;
 
-                                    cursor = 0;
-                                    max_width = cursor_max;
+                                        cursor = 0;
+                                        max_width = cursor_max;
 
-                                    if let Some(rs) = rest_start {
-                                        // Word wrap: carry remainder to next line.
-                                        let remainder = line_buf[rs..].to_string();
-                                        let rem_width: usize =
-                                            remainder.chars().map(char_width).sum();
-                                        line_buf.clear();
-                                        line_buf.push_str(&remainder);
-                                        current_width = rem_width + cw;
-                                    } else {
-                                        line_buf.clear();
-                                        current_width = cw;
+                                        if let Some(rs) = rest_start {
+                                            // Word wrap: carry remainder to next line.
+                                            let remainder = line_buf[rs..].to_string();
+                                            let rem_width: usize =
+                                                remainder.chars().map(char_width).sum();
+                                            line_buf_search_highlights = line_buf_search_highlights
+                                                .iter()
+                                                .filter_map(|range| {
+                                                    let start = range.start.max(rs);
+                                                    (start < range.end)
+                                                        .then_some(start - rs..range.end - rs)
+                                                })
+                                                .collect();
+                                            line_buf = remainder;
+                                            current_width = rem_width + cw;
+                                        } else {
+                                            line_buf.clear();
+                                            line_buf_search_highlights.clear();
+                                            current_width = cw;
+                                        }
+                                        last_ws_idx = None;
                                     }
-                                    last_ws_idx = None;
-                                }
 
-                                line_buf.push(c);
+                                    let character_start = line_buf.len();
+                                    line_buf.push(c);
+                                    if segment.highlighted {
+                                        let character_end = line_buf.len();
+                                        if let Some(previous) =
+                                            line_buf_search_highlights.last_mut()
+                                        {
+                                            if previous.end == character_start {
+                                                previous.end = character_end;
+                                                continue;
+                                            }
+                                        }
+                                        line_buf_search_highlights
+                                            .push(character_start..character_end);
+                                    }
+                                }
                             }
 
-                            // flush the buffer
+                            // Flush the buffer.
                             cursor += current_width;
-                            write!(
+                            self.write_wrapped_text(
                                 handle,
-                                "{}",
-                                as_terminal_escaped(
-                                    style,
-                                    &format!("{}{line_buf}", self.ansi_style),
-                                    self.config.true_color,
-                                    self.config.colored_output,
-                                    self.config.use_italic_text,
-                                    background_color
-                                )
+                                style,
+                                &line_buf,
+                                &line_buf_search_highlights,
+                                highlight_this_line,
+                                underline_search_matches,
                             )?;
                         }
 
@@ -946,10 +1160,11 @@ impl Printer for InteractivePrinter<'_> {
                             self.ansi_style.update(chunk);
                         }
                     }
+                    source_offset += chunk_len;
                 }
             }
 
-            if let Some(background_color) = background_color {
+            if let Some(background_color) = line_background_color {
                 let ansi_style = Style {
                     background: to_ansi_color(background_color, self.config.true_color),
                     ..Default::default()
@@ -1014,5 +1229,49 @@ impl Colors {
             git_modified: Yellow.normal(),
             line_number: gutter_style,
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn regex(pattern: &str) -> Regex {
+        assert!(Regex::try_compile(pattern).is_none());
+        Regex::new(pattern.to_owned())
+    }
+
+    #[test]
+    fn search_ranges_merge_overlapping_patterns_and_ignore_line_endings() {
+        let patterns = [regex("foo"), regex("o b")];
+        let mut regions = [Region::new(), Region::new()];
+        let ranges = search_highlight_ranges(&patterns, &mut regions, "foo bar foo\r\n");
+        assert_eq!(ranges, vec![0..5, 8..11]);
+    }
+
+    #[test]
+    fn search_ranges_ignore_empty_matches() {
+        let mut regions = [Region::new()];
+        assert!(search_highlight_ranges(&[regex("^")], &mut regions, "text\n").is_empty());
+        assert!(search_highlight_ranges(&[regex("$")], &mut regions, "text\n").is_empty());
+    }
+
+    #[test]
+    fn search_highlights_can_cross_syntax_regions() {
+        let ranges = [0..5, 8..11];
+        let segments: Vec<_> = split_search_highlights("o bar", 2, &ranges).collect();
+        assert_eq!(
+            segments,
+            vec![
+                SearchHighlightSegment {
+                    text: "o b",
+                    highlighted: true,
+                },
+                SearchHighlightSegment {
+                    text: "ar",
+                    highlighted: false,
+                },
+            ]
+        );
     }
 }

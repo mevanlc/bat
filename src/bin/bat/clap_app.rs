@@ -149,6 +149,22 @@ pub fn build_app(interactive_output: bool) -> Command {
                 ),
         )
         .arg(
+            Arg::new("highlight-search")
+                .long("highlight-search")
+                .action(ArgAction::Append)
+                .value_name("regex")
+                .value_parser(|pattern: &str| {
+                    syntect::parsing::Regex::try_compile(pattern)
+                        .map(|error| Err(error.to_string()))
+                        .unwrap_or_else(|| Ok(pattern.to_owned()))
+                })
+                .help("Highlight text matching a regular expression.")
+                .long_help(
+                    "Highlight text matching a regular expression with the same background color \
+                     as '--highlight-line'. Matches are evaluated separately for each input line.",
+                ),
+        )
+        .arg(
             Arg::new("file-name")
                 .long("file-name")
                 .action(ArgAction::Append)

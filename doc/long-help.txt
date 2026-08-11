@@ -52,6 +52,10 @@ Options:
             '--highlight-line 40:' highlights lines 40 to the end of the file
             '--highlight-line 30:+10' highlights lines 30 to 40
 
+      --highlight-search <regex>
+          Highlight text matching a regular expression with the same background color as
+          '--highlight-line'. Matches are evaluated separately for each input line.
+
       --file-name <name>
           Specify the name to display for a file. Useful when piping data to bat from STDIN when bat
           does not otherwise know the filename. Note that the provided file name is also used for

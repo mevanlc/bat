@@ -88,6 +88,7 @@ _bat() {
 		return 0
 		;;
 	-H | --highlight-line | \
+	--highlight-search | \
 	--diff-context | \
 	--tabs | \
 	--terminal-width | \
@@ -202,6 +203,7 @@ _bat() {
 			--plain
 			--language
 			--highlight-line
+			--highlight-search
 			--file-name
 			--diff
 			--diff-context

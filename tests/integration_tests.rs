@@ -2945,6 +2945,93 @@ fn ansi_highlight_underline() {
         .stderr("");
 }
 
+#[test]
+fn highlight_search_only_highlights_matching_characters() {
+    bat()
+        .arg("--paging=never")
+        .arg("--color=never")
+        .arg("--terminal-width=80")
+        .arg("--wrap=never")
+        .arg("--decorations=always")
+        .arg("--theme=Coldark-Dark")
+        .arg("--style=plain")
+        .arg("--highlight-search=foo")
+        .write_stdin("alpha foo beta foo\nbar")
+        .assert()
+        .success()
+        .stdout(
+            "alpha \x1B[48;5;236mfoo\x1B[0m beta \
+             \x1B[48;5;236mfoo\x1B[0m\nbar",
+        )
+        .stderr("");
+}
+
+#[test]
+fn highlight_search_does_not_span_lines() {
+    bat()
+        .arg("--paging=never")
+        .arg("--color=never")
+        .arg("--terminal-width=80")
+        .arg("--wrap=never")
+        .arg("--decorations=always")
+        .arg("--theme=Coldark-Dark")
+        .arg("--style=plain")
+        .arg("--highlight-search=foo\nbar")
+        .write_stdin("foo\nbar")
+        .assert()
+        .success()
+        .stdout("foo\nbar")
+        .stderr("");
+}
+
+#[test]
+fn highlight_search_preserves_word_wrapping() {
+    bat()
+        .arg("--paging=never")
+        .arg("--color=never")
+        .arg("--terminal-width=10")
+        .arg("--wrap=word")
+        .arg("--decorations=always")
+        .arg("--theme=Coldark-Dark")
+        .arg("--style=plain")
+        .arg("--highlight-search=MATCH")
+        .write_stdin("one two MATCH four\n")
+        .assert()
+        .success()
+        .stdout("one two\n\x1B[48;5;236mMATCH\x1B[0m four\n")
+        .stderr("");
+}
+
+#[test]
+fn ansi_highlight_search_underline() {
+    bat()
+        .arg("--paging=never")
+        .arg("--color=never")
+        .arg("--terminal-width=80")
+        .arg("--wrap=never")
+        .arg("--decorations=always")
+        .arg("--theme=ansi")
+        .arg("--style=plain")
+        .arg("--highlight-search=foo")
+        .write_stdin("alpha foo beta")
+        .assert()
+        .success()
+        .stdout("alpha \x1B[4mfoo\x1B[24m beta")
+        .stderr("");
+}
+
+#[test]
+fn highlight_search_rejects_invalid_regex() {
+    bat()
+        .arg("--highlight-search=[")
+        .write_stdin("")
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains(
+            "invalid value '[' for '--highlight-search <regex>'",
+        ));
+}
+
 // we don't really test other color schemes in the syntax-tests/source vs highlighted stuff
 // so here a simple integration test has been made for the ANSI theme,
 // which lives directly inside the bat repository

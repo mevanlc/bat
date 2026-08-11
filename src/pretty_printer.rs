@@ -2,6 +2,7 @@ use std::io::Read;
 use std::path::Path;
 
 use console::Term;
+use syntect::parsing::Regex;
 
 use crate::{
     assets::HighlightingAssets,
@@ -246,6 +247,12 @@ impl<'a> PrettyPrinter<'a> {
     /// of lines.
     pub fn highlight_range(&mut self, from: usize, to: usize) -> &mut Self {
         self.highlighted_lines.push(LineRange::new(from, to));
+        self
+    }
+
+    /// Specify a regular expression whose matches should be highlighted.
+    pub fn highlight_search(&mut self, pattern: Regex) -> &mut Self {
+        self.config.highlighted_search_patterns.push(pattern);
         self
     }
 

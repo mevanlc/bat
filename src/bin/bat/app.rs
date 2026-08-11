@@ -532,6 +532,15 @@ impl App {
                 .map(LineRanges::from)
                 .map(HighlightedLineRanges)
                 .unwrap_or_default(),
+            highlighted_search_patterns: self
+                .matches
+                .get_many::<String>("highlight-search")
+                .map(|patterns| {
+                    patterns
+                        .map(|pattern| syntect::parsing::Regex::new(pattern.clone()))
+                        .collect()
+                })
+                .unwrap_or_default(),
             use_custom_assets: !self.matches.get_flag("no-custom-assets"),
             #[cfg(feature = "lessopen")]
             use_lessopen: self.matches.get_flag("lessopen"),
