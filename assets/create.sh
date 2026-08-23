@@ -50,7 +50,7 @@ bat cache --clear
 (
     cd "$ASSET_DIR"
     for patch in patches/*.patch; do
-        patch --strip=0 < "$patch"
+        patch -V none --strip=0 < "$patch"
     done
 )
 
@@ -58,7 +58,7 @@ reverse_patches() {
     (
         cd "$ASSET_DIR"
         for patch in patches/*.patch; do
-            patch --strip=0 --reverse <"$patch"
+            patch -V none --strip=0 --reverse <"$patch"
         done
     )
 }
